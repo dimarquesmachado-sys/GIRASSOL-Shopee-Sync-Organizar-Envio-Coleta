@@ -283,4 +283,7 @@ app.get('/shopee/callback', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Girassol Shopee Sync rodando na porta ${PORT}`);
-  console.log(`Partner ID: ${SHOPEE_PARTNER_ID || 'NAO CONFIGUR
+  console.log(`Partner ID: ${SHOPEE_PARTNER_ID || 'NAO CONFIGURADO'}`);
+  console.log(`Partner Key length: ${SHOPEE_PARTNER_KEY ? SHOPEE_PARTNER_KEY.length : 0}`);
+  console.log(`Host: ${SHOPEE_HOST}`);
+});
