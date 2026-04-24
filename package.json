@@ -1,13 +1,14 @@
 {
   "name": "girassol-shopee-sync",
-  "version": "0.0.1",
+  "version": "0.6.0",
   "description": "Sincronizacao automatica de NF-e do Bling para Shopee",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "axios": "^1.7.7"
   },
   "engines": {
     "node": ">=18.0.0"
