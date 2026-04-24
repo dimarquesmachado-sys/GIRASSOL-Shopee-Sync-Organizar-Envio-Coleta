@@ -11,48 +11,51 @@ const NODE_ENV = process.env.NODE_ENV || 'sandbox';
 
 app.use(express.json());
 
-// =========================================================
-// Helpers
-// =========================================================
-
-function signWithKey(key, apiPath, timestamp) {
+function signWithKey(keyBufferOrString, apiPath, timestamp) {
   const baseString = `${SHOPEE_PARTNER_ID}${apiPath}${timestamp}`;
-  return crypto.createHmac('sha256', key).update(baseString).digest('hex');
-}
-
-function signPublic(apiPath, timestamp) {
-  // Usa a chave EFETIVA - tenta sem prefixo shpk primeiro, depois com
-  const effectiveKey = getEffectiveKey();
-  return signWithKey(effectiveKey, apiPath, timestamp);
-}
-
-function getEffectiveKey() {
-  // Prefixo "shpk" indica novo formato - a chave real pode ser sem ele
-  // Se tiver sido determinado, usar a variante que funciona
-  const override = process.env.SHOPEE_KEY_VARIANT; // 'full' ou 'no_prefix'
-  const key = SHOPEE_PARTNER_KEY || '';
-  if (override === 'no_prefix' && key.startsWith('shpk')) {
-    return key.substring(4);
-  }
-  return key;
+  return crypto.createHmac('sha256', keyBufferOrString).update(baseString).digest('hex');
 }
 
 function nowTs() {
   return Math.floor(Date.now() / 1000);
 }
 
+function isHex(s) {
+  return /^[a-f0-9]+$/i.test(s);
+}
+
 function checkConfig(res) {
   if (!SHOPEE_PARTNER_ID || !SHOPEE_PARTNER_KEY) {
-    res.status(500).json({
-      error: 'Configuracao incompleta',
-      missing: {
-        SHOPEE_PARTNER_ID: !SHOPEE_PARTNER_ID,
-        SHOPEE_PARTNER_KEY: !SHOPEE_PARTNER_KEY
-      }
-    });
+    res.status(500).json({ error: 'Configuracao incompleta' });
     return false;
   }
   return true;
+}
+
+// =========================================================
+// Sign usando variante configurada
+// =========================================================
+function getSigningKey() {
+  const variant = process.env.SHOPEE_KEY_VARIANT || 'full';
+  const key = SHOPEE_PARTNER_KEY || '';
+  const noPrefix = key.startsWith('shpk') ? key.substring(4) : key;
+
+  switch (variant) {
+    case 'no_prefix':
+      return noPrefix;
+    case 'hex_bytes':
+      return Buffer.from(noPrefix, 'hex');
+    case 'full_hex_bytes':
+      // Improvável mas possível
+      return Buffer.from(key, 'hex');
+    case 'full':
+    default:
+      return key;
+  }
+}
+
+function signPublic(apiPath, timestamp) {
+  return signWithKey(getSigningKey(), apiPath, timestamp);
 }
 
 // =========================================================
@@ -62,173 +65,143 @@ function checkConfig(res) {
 app.get('/', (req, res) => {
   res.json({
     service: 'Girassol Shopee NFe Sync',
-    status: 'online',
-    version: '0.4.0',
-    environment: NODE_ENV,
-    shopee_host: SHOPEE_HOST,
-    key_variant: process.env.SHOPEE_KEY_VARIANT || 'full',
-    timestamp: new Date().toISOString(),
+    version: '0.5.0',
+    key_variant: process.env.SHOPEE_KEY_VARIANT || 'full (default)',
     actions: {
-      start_auth: `${BASE_URL}/shopee/auth`,
-      test_sign: `${BASE_URL}/shopee/test-sign`,
-      debug: `${BASE_URL}/shopee/debug`,
-      status: `${BASE_URL}/status`
+      test_sign_v2: `${BASE_URL}/shopee/test-sign-v2`,
+      start_auth: `${BASE_URL}/shopee/auth`
     }
   });
 });
 
 app.get('/status', (req, res) => {
   res.json({
-    timestamp: new Date().toISOString(),
     config: {
-      environment: NODE_ENV,
-      shopee_host: SHOPEE_HOST,
       partner_id: SHOPEE_PARTNER_ID || 'NAO_CONFIGURADO',
       partner_key: SHOPEE_PARTNER_KEY ? 'CONFIGURADA' : 'NAO_CONFIGURADA',
       key_variant: process.env.SHOPEE_KEY_VARIANT || 'full (default)',
       shop_id: process.env.SHOPEE_SHOP_ID || 'NAO_AUTORIZADA',
-      access_token: process.env.SHOPEE_ACCESS_TOKEN ? 'CONFIGURADO' : 'NAO_CONFIGURADO',
-      refresh_token: process.env.SHOPEE_REFRESH_TOKEN ? 'CONFIGURADO' : 'NAO_CONFIGURADO'
+      access_token: process.env.SHOPEE_ACCESS_TOKEN ? 'OK' : 'NAO_CONFIGURADO'
     }
   });
 });
 
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
-
 // =========================================================
-// TESTE DE ASSINATURA - descobre qual variante da chave funciona
+// TESTE AVANCADO - 4 variantes de chave
 // =========================================================
 
-app.get('/shopee/test-sign', async (req, res) => {
+app.get('/shopee/test-sign-v2', async (req, res) => {
   if (!checkConfig(res)) return;
 
   const apiPath = '/api/v2/public/get_shops_by_partner';
   const timestamp = nowTs();
-  const baseString = `${SHOPEE_PARTNER_ID}${apiPath}${timestamp}`;
   const key = SHOPEE_PARTNER_KEY;
+  const noPrefix = key.startsWith('shpk') ? key.substring(4) : key;
 
-  // Variante A: chave inteira (como esta, com prefixo shpk)
-  const signA = signWithKey(key, apiPath, timestamp);
+  const variants = [
+    {
+      name: 'A_full_string',
+      description: 'Chave inteira como string UTF-8 (incluindo prefixo shpk)',
+      info: { length: key.length, first4: key.substring(0, 4) },
+      keyForSign: key
+    },
+    {
+      name: 'B_no_prefix_string',
+      description: 'Chave sem prefixo shpk como string UTF-8',
+      info: { length: noPrefix.length, first4: noPrefix.substring(0, 4), isHex: isHex(noPrefix) },
+      keyForSign: noPrefix
+    },
+    {
+      name: 'C_no_prefix_hex_bytes',
+      description: 'Chave sem prefixo convertida de hex para bytes binarios',
+      info: {
+        isHex: isHex(noPrefix),
+        bytesLength: isHex(noPrefix) ? noPrefix.length / 2 : 'nao_eh_hex'
+      },
+      keyForSign: isHex(noPrefix) ? Buffer.from(noPrefix, 'hex') : null
+    },
+    {
+      name: 'D_full_as_hex_bytes',
+      description: 'Chave inteira tentada como hex (provavelmente falha pq shpk nao eh hex)',
+      info: { isHex: isHex(key) },
+      keyForSign: isHex(key) ? Buffer.from(key, 'hex') : null
+    }
+  ];
 
-  // Variante B: chave SEM prefixo "shpk" (remove primeiros 4 chars)
-  const keyNoPrefix = key.startsWith('shpk') ? key.substring(4) : key;
-  const signB = signWithKey(keyNoPrefix, apiPath, timestamp);
+  const results = [];
 
-  const urlA = `${SHOPEE_HOST}${apiPath}?partner_id=${SHOPEE_PARTNER_ID}&timestamp=${timestamp}&sign=${signA}&page_size=10&page_no=1`;
-  const urlB = `${SHOPEE_HOST}${apiPath}?partner_id=${SHOPEE_PARTNER_ID}&timestamp=${timestamp}&sign=${signB}&page_size=10&page_no=1`;
+  for (const v of variants) {
+    if (!v.keyForSign) {
+      results.push({
+        variant: v.name,
+        description: v.description,
+        info: v.info,
+        skipped: true,
+        reason: 'Chave incompativel com este formato'
+      });
+      continue;
+    }
 
-  let respA = null;
-  let respB = null;
+    const sign = signWithKey(v.keyForSign, apiPath, timestamp);
+    const url = `${SHOPEE_HOST}${apiPath}?partner_id=${SHOPEE_PARTNER_ID}&timestamp=${timestamp}&sign=${sign}&page_size=10&page_no=1`;
 
-  try {
-    const r = await fetch(urlA);
-    respA = await r.json();
-  } catch (e) {
-    respA = { fetch_error: e.message };
+    let response;
+    try {
+      const r = await fetch(url);
+      response = await r.json();
+    } catch (e) {
+      response = { fetch_error: e.message };
+    }
+
+    results.push({
+      variant: v.name,
+      description: v.description,
+      info: v.info,
+      sign_first_12: sign.substring(0, 12),
+      response: response,
+      works: response && !response.error
+    });
   }
 
-  try {
-    const r = await fetch(urlB);
-    respB = await r.json();
-  } catch (e) {
-    respB = { fetch_error: e.message };
-  }
-
-  const variantAWorks = respA && !respA.error;
-  const variantBWorks = respB && !respB.error;
-
+  const winner = results.find(r => r.works);
   let recommendation;
-  if (variantAWorks) {
-    recommendation = 'USE variante A (chave inteira com prefixo shpk). No Render, configure SHOPEE_KEY_VARIANT=full ou nao configure (padrao).';
-  } else if (variantBWorks) {
-    recommendation = 'USE variante B (chave SEM prefixo shpk). No Render, adicione SHOPEE_KEY_VARIANT=no_prefix e redeploy.';
+  if (winner) {
+    const variantToUse = winner.variant.includes('A_full') ? 'full' :
+                         winner.variant.includes('B_no_prefix_string') ? 'no_prefix' :
+                         winner.variant.includes('C_no_prefix_hex_bytes') ? 'hex_bytes' :
+                         'full_hex_bytes';
+    recommendation = `FUNCIONOU! Variante: ${winner.variant}. No Render, adicione/altere a env var SHOPEE_KEY_VARIANT=${variantToUse}`;
   } else {
-    recommendation = 'NENHUMA variante funcionou. A chave pode estar corrompida, precisa resetar no Shopee Open Platform.';
+    recommendation = 'Nenhuma variante funcionou. Proximos passos: (1) resetar a chave no Shopee Open Platform ou (2) investigar se precisa ativar Go-Live primeiro.';
   }
 
   res.json({
     endpoint_tested: apiPath,
+    base_string: `${SHOPEE_PARTNER_ID}${apiPath}${timestamp}`,
     timestamp: timestamp,
-    base_string: baseString,
-    partner_id: SHOPEE_PARTNER_ID,
-    variants: {
-      A_full_key: {
-        description: 'Chave completa (incluindo prefixo shpk)',
-        key_length: key.length,
-        key_first_4: key.substring(0, 4),
-        sign_first_12: signA.substring(0, 12),
-        response: respA,
-        works: variantAWorks
-      },
-      B_without_prefix: {
-        description: 'Chave SEM prefixo shpk',
-        key_length: keyNoPrefix.length,
-        key_first_4: keyNoPrefix.substring(0, 4),
-        sign_first_12: signB.substring(0, 12),
-        response: respB,
-        works: variantBWorks
-      }
-    },
+    results: results,
     recommendation: recommendation
   });
 });
 
 // =========================================================
-// DEBUG - info da chave sem chamar API
-// =========================================================
-
-app.get('/shopee/debug', (req, res) => {
-  if (!checkConfig(res)) return;
-
-  const key = SHOPEE_PARTNER_KEY || '';
-  res.json({
-    partner_id: SHOPEE_PARTNER_ID,
-    key_length: key.length,
-    key_first_4: key.substring(0, 4),
-    key_last_4: key.substring(key.length - 4),
-    key_variant_env: process.env.SHOPEE_KEY_VARIANT || 'not_set',
-    effective_key_length: getEffectiveKey().length,
-    effective_key_first_4: getEffectiveKey().substring(0, 4)
-  });
-});
-
-// =========================================================
-// Rotas OAuth Shopee
+// OAuth (usa getSigningKey configurada)
 // =========================================================
 
 app.get('/shopee/auth', (req, res) => {
   if (!checkConfig(res)) return;
-
   const apiPath = '/api/v2/shop/auth_partner';
   const timestamp = nowTs();
   const sign = signPublic(apiPath, timestamp);
   const redirectUrl = `${BASE_URL}/shopee/callback`;
-
-  const authUrl = `${SHOPEE_HOST}${apiPath}` +
-    `?partner_id=${SHOPEE_PARTNER_ID}` +
-    `&timestamp=${timestamp}` +
-    `&sign=${sign}` +
-    `&redirect=${encodeURIComponent(redirectUrl)}`;
+  const authUrl = `${SHOPEE_HOST}${apiPath}?partner_id=${SHOPEE_PARTNER_ID}&timestamp=${timestamp}&sign=${sign}&redirect=${encodeURIComponent(redirectUrl)}`;
 
   res.send(`
-    <!DOCTYPE html>
-    <html><head><meta charset="UTF-8"><title>Autorizar Shopee</title>
-    <style>
-      body { font-family: -apple-system, sans-serif; max-width: 700px; margin: 60px auto; padding: 20px; }
-      h1 { color: #ee4d2d; }
-      .info { background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 20px 0; }
-      .btn { display: inline-block; background: #ee4d2d; color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; }
-      code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-size: 13px; }
-    </style></head><body>
-    <h1>Autorizar Loja Shopee</h1>
-    <div class="info">
-      <p><strong>Ambiente:</strong> ${NODE_ENV}</p>
-      <p><strong>Key Variant:</strong> <code>${process.env.SHOPEE_KEY_VARIANT || 'full (default)'}</code></p>
-      <p><strong>Partner ID:</strong> <code>${SHOPEE_PARTNER_ID}</code></p>
-    </div>
-    <p><a class="btn" href="${authUrl}">Autorizar com Shopee</a></p>
+    <!DOCTYPE html><html><head><meta charset="UTF-8"><title>Autorizar</title>
+    <style>body{font-family:sans-serif;max-width:700px;margin:60px auto;padding:20px}.btn{display:inline-block;background:#ee4d2d;color:white;padding:15px 30px;text-decoration:none;border-radius:8px;font-weight:bold}</style>
+    </head><body><h1>Autorizar Shopee</h1>
+    <p>Variante: <strong>${process.env.SHOPEE_KEY_VARIANT || 'full (default)'}</strong></p>
+    <a class="btn" href="${authUrl}">Autorizar com Shopee</a>
     </body></html>
   `);
 });
@@ -236,61 +209,38 @@ app.get('/shopee/auth', (req, res) => {
 app.get('/shopee/callback', async (req, res) => {
   if (!checkConfig(res)) return;
   const { code, shop_id } = req.query;
-
   if (!code || !shop_id) {
-    return res.status(400).send(`<h1>Erro</h1><pre>${JSON.stringify(req.query, null, 2)}</pre>`);
+    return res.status(400).send(`<pre>${JSON.stringify(req.query, null, 2)}</pre>`);
   }
-
   try {
     const apiPath = '/api/v2/auth/token/get';
     const timestamp = nowTs();
     const sign = signPublic(apiPath, timestamp);
     const url = `${SHOPEE_HOST}${apiPath}?partner_id=${SHOPEE_PARTNER_ID}&timestamp=${timestamp}&sign=${sign}`;
     const body = { code, shop_id: parseInt(shop_id, 10), partner_id: parseInt(SHOPEE_PARTNER_ID, 10) };
-
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
     const data = await response.json();
-
     if (data.error || !data.access_token) {
-      return res.status(500).send(`<h1>Erro ao obter token</h1><pre>${JSON.stringify(data, null, 2)}</pre>`);
+      return res.status(500).send(`<h1>Erro</h1><pre>${JSON.stringify(data, null, 2)}</pre>`);
     }
-
     res.send(`
-      <!DOCTYPE html><html><head><meta charset="UTF-8"><title>Tokens</title>
-      <style>
-        body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; }
-        h1 { color: #ee4d2d; }
-        .success { background: #e6f7e6; border: 2px solid #4caf50; padding: 20px; border-radius: 8px; }
-        .token-box { background: #f5f5f5; border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin: 15px 0; }
-        code { background: #fff; padding: 10px; display: block; word-break: break-all; border: 1px solid #ccc; font-size: 13px; }
-        button { background: #ee4d2d; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; }
-      </style>
-      <script>
-        function copyText(id, btn) {
-          navigator.clipboard.writeText(document.getElementById(id).textContent.trim());
-          btn.textContent = 'Copiado!';
-          setTimeout(() => { btn.textContent = 'Copiar'; }, 2000);
-        }
-      </script></head><body>
-      <h1>Tokens Gerados</h1>
-      <div class="success"><strong>Shop ID:</strong> ${shop_id} | <strong>Expira em:</strong> ${Math.round(data.expire_in/3600)}h</div>
-      <div class="token-box"><strong>SHOPEE_SHOP_ID</strong> <button onclick="copyText('sid', this)">Copiar</button><code id="sid">${shop_id}</code></div>
-      <div class="token-box"><strong>SHOPEE_ACCESS_TOKEN</strong> <button onclick="copyText('at', this)">Copiar</button><code id="at">${data.access_token}</code></div>
-      <div class="token-box"><strong>SHOPEE_REFRESH_TOKEN</strong> <button onclick="copyText('rt', this)">Copiar</button><code id="rt">${data.refresh_token}</code></div>
+      <!DOCTYPE html><html><body style="font-family:sans-serif;max-width:900px;margin:40px auto;padding:20px">
+      <h1 style="color:#ee4d2d">Tokens Gerados!</h1>
+      <div style="background:#e6f7e6;border:2px solid #4caf50;padding:20px;border-radius:8px">Shop ID: ${shop_id} | Expira em ${Math.round(data.expire_in/3600)}h</div>
+      <h3>SHOPEE_SHOP_ID</h3><code style="background:#fff;padding:10px;display:block;word-break:break-all;border:1px solid #ccc">${shop_id}</code>
+      <h3>SHOPEE_ACCESS_TOKEN</h3><code style="background:#fff;padding:10px;display:block;word-break:break-all;border:1px solid #ccc">${data.access_token}</code>
+      <h3>SHOPEE_REFRESH_TOKEN</h3><code style="background:#fff;padding:10px;display:block;word-break:break-all;border:1px solid #ccc">${data.refresh_token}</code>
       </body></html>
     `);
   } catch (err) {
-    res.status(500).send(`<h1>Erro</h1><pre>${err.message}</pre>`);
+    res.status(500).send(`<pre>${err.message}</pre>`);
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Girassol Shopee Sync na porta ${PORT}`);
-  console.log(`Partner ID: ${SHOPEE_PARTNER_ID || 'NAO CONFIGURADO'}`);
-  console.log(`Key length: ${SHOPEE_PARTNER_KEY ? SHOPEE_PARTNER_KEY.length : 0}`);
-  console.log(`Key variant: ${process.env.SHOPEE_KEY_VARIANT || 'full (default)'}`);
+  console.log(`Girassol Shopee Sync porta ${PORT} | variant: ${process.env.SHOPEE_KEY_VARIANT || 'full'}`);
 });
