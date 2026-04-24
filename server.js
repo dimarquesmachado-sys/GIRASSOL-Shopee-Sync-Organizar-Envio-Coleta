@@ -46,7 +46,7 @@ app.get('/', (req, res) => {
   res.json({
     service: 'Girassol Shopee NFe Sync',
     status: 'online',
-    version: '0.2.0',
+    version: '0.3.0',
     environment: NODE_ENV,
     shopee_host: SHOPEE_HOST,
     partner_id_configured: !!SHOPEE_PARTNER_ID,
@@ -55,6 +55,7 @@ app.get('/', (req, res) => {
     timestamp: new Date().toISOString(),
     actions: {
       start_auth: `${BASE_URL}/shopee/auth`,
+      debug: `${BASE_URL}/shopee/debug`,
       status: `${BASE_URL}/status`
     }
   });
@@ -82,10 +83,64 @@ app.get('/health', (req, res) => {
 });
 
 // =========================================================
+// DEBUG - diagnostico de assinatura
+// =========================================================
+
+app.get('/shopee/debug', (req, res) => {
+  if (!checkConfig(res)) return;
+
+  const apiPath = '/api/v2/shop/auth_partner';
+  const timestamp = nowTs();
+  const sign = signPublic(apiPath, timestamp);
+  const baseString = `${SHOPEE_PARTNER_ID}${apiPath}${timestamp}`;
+
+  const key = SHOPEE_PARTNER_KEY || '';
+  const id = SHOPEE_PARTNER_ID || '';
+
+  res.json({
+    config: {
+      partner_id: id,
+      host: SHOPEE_HOST,
+      base_url: BASE_URL,
+    },
+    partner_id_check: {
+      value: id,
+      length: id.length,
+      starts_with_space: id.startsWith(' '),
+      ends_with_space: id.endsWith(' '),
+      has_whitespace: /\s/.test(id),
+      is_numeric: /^\d+$/.test(id)
+    },
+    partner_key_check: {
+      length: key.length,
+      first_4_chars: key.substring(0, 4),
+      last_4_chars: key.substring(key.length - 4),
+      starts_with_space: key.startsWith(' '),
+      ends_with_space: key.endsWith(' '),
+      has_newline: key.includes('\n') || key.includes('\r'),
+      has_tab: key.includes('\t'),
+      has_any_whitespace: /\s/.test(key),
+      is_hex_only: /^[a-f0-9]+$/i.test(key)
+    },
+    test_signature: {
+      api_path: apiPath,
+      timestamp: timestamp,
+      base_string: baseString,
+      sign: sign
+    },
+    server_time: {
+      utc: new Date().toISOString(),
+      local: new Date().toString(),
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      unix: Math.floor(Date.now() / 1000)
+    }
+  });
+});
+
+// =========================================================
 // Rotas OAuth Shopee
 // =========================================================
 
-// Pagina inicial de autorizacao (com botao para iniciar)
 app.get('/shopee/auth', (req, res) => {
   if (!checkConfig(res)) return;
 
@@ -121,28 +176,25 @@ app.get('/shopee/auth', (req, res) => {
         <p><strong>Ambiente:</strong> ${NODE_ENV}</p>
         <p><strong>Shopee Host:</strong> <code>${SHOPEE_HOST}</code></p>
         <p><strong>Partner ID:</strong> <code>${SHOPEE_PARTNER_ID}</code></p>
-        <p><strong>Callback:</strong> <code>${redirectUrl}</code></p>
+        <p><strong>Timestamp:</strong> <code>${timestamp}</code></p>
+        <p><strong>Sign (primeiros 12 chars):</strong> <code>${sign.substring(0, 12)}...</code></p>
       </div>
-      <p>Ao clicar no botao abaixo, voce sera redirecionado para a Shopee para autorizar este App.</p>
-      <p>Na Shopee, faca login com sua conta de VENDEDOR do Girassol, nao com a conta de desenvolvedor.</p>
+      <p>Ao clicar, voce sera redirecionado para a Shopee.</p>
       <p><a class="btn" href="${authUrl}">Autorizar com Shopee</a></p>
     </body>
     </html>
   `);
 });
 
-// Callback - recebe code e shop_id e troca por access_token
 app.get('/shopee/callback', async (req, res) => {
   if (!checkConfig(res)) return;
 
   const { code, shop_id } = req.query;
-
   console.log('[CALLBACK] Query params:', req.query);
 
   if (!code || !shop_id) {
     return res.status(400).send(`
       <h1>Erro no callback</h1>
-      <p>Faltou code ou shop_id nos parametros.</p>
       <pre>${JSON.stringify(req.query, null, 2)}</pre>
     `);
   }
@@ -160,7 +212,6 @@ app.get('/shopee/callback', async (req, res) => {
       partner_id: parseInt(SHOPEE_PARTNER_ID, 10)
     };
 
-    console.log('[CALLBACK] Calling token/get...');
     const response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -173,29 +224,24 @@ app.get('/shopee/callback', async (req, res) => {
     if (data.error || !data.access_token) {
       return res.status(500).send(`
         <h1>Erro ao obter token</h1>
-        <p><strong>Shopee retornou erro:</strong></p>
         <pre>${JSON.stringify(data, null, 2)}</pre>
       `);
     }
 
-    // Sucesso! Exibir tokens pro usuario copiar
     res.send(`
       <!DOCTYPE html>
       <html>
       <head>
         <meta charset="UTF-8">
-        <title>Tokens Shopee Gerados</title>
+        <title>Tokens Gerados</title>
         <style>
           body { font-family: -apple-system, sans-serif; max-width: 900px; margin: 40px auto; padding: 20px; }
           h1 { color: #ee4d2d; }
-          .success { background: #e6f7e6; border: 2px solid #4caf50; padding: 20px; border-radius: 8px; margin: 20px 0; }
+          .success { background: #e6f7e6; border: 2px solid #4caf50; padding: 20px; border-radius: 8px; }
           .token-box { background: #f5f5f5; border: 1px solid #ddd; padding: 15px; border-radius: 8px; margin: 15px 0; }
-          .token-box strong { display: block; margin-bottom: 8px; color: #333; font-size: 15px; }
-          code { background: #fff; padding: 10px; display: block; word-break: break-all; border: 1px solid #ccc; font-size: 13px; font-family: monospace; margin-top: 8px; }
+          .token-box strong { display: block; margin-bottom: 8px; }
+          code { background: #fff; padding: 10px; display: block; word-break: break-all; border: 1px solid #ccc; font-size: 13px; font-family: monospace; }
           .warning { background: #fff3cd; border: 2px solid #ffc107; padding: 15px; border-radius: 8px; margin: 20px 0; }
-          .step { background: #e3f2fd; padding: 20px; border-radius: 8px; margin: 20px 0; }
-          .step ol { margin: 10px 0; padding-left: 20px; }
-          .step li { margin: 8px 0; }
           button { background: #ee4d2d; color: white; border: none; padding: 8px 15px; border-radius: 4px; cursor: pointer; font-size: 12px; margin-left: 10px; }
         </style>
         <script>
@@ -208,66 +254,33 @@ app.get('/shopee/callback', async (req, res) => {
         </script>
       </head>
       <body>
-        <h1>Tokens Shopee Gerados com Sucesso</h1>
-
+        <h1>Tokens Shopee Gerados</h1>
         <div class="success">
-          <strong>Loja autorizada:</strong> Shop ID ${shop_id}<br>
-          <strong>Access Token expira em:</strong> ${data.expire_in} segundos (aproximadamente ${Math.round(data.expire_in/3600)} horas)<br>
-          <strong>Refresh Token valido por:</strong> 30 dias
+          <strong>Shop ID:</strong> ${shop_id}<br>
+          <strong>Expira em:</strong> ${Math.round(data.expire_in/3600)} horas
         </div>
-
-        <div class="warning">
-          <strong>IMPORTANTE:</strong> Copie os 3 valores abaixo e adicione como variaveis de ambiente no Render AGORA.
-          Esses valores so aparecem AQUI, UMA VEZ.
-        </div>
-
+        <div class="warning"><strong>IMPORTANTE:</strong> Copie os 3 valores abaixo AGORA.</div>
         <div class="token-box">
-          <strong>1. SHOPEE_SHOP_ID <button onclick="copyText('shop_id', this)">Copiar</button></strong>
-          <code id="shop_id">${shop_id}</code>
+          <strong>SHOPEE_SHOP_ID <button onclick="copyText('sid', this)">Copiar</button></strong>
+          <code id="sid">${shop_id}</code>
         </div>
-
         <div class="token-box">
-          <strong>2. SHOPEE_ACCESS_TOKEN <button onclick="copyText('access_token', this)">Copiar</button></strong>
-          <code id="access_token">${data.access_token}</code>
+          <strong>SHOPEE_ACCESS_TOKEN <button onclick="copyText('at', this)">Copiar</button></strong>
+          <code id="at">${data.access_token}</code>
         </div>
-
         <div class="token-box">
-          <strong>3. SHOPEE_REFRESH_TOKEN <button onclick="copyText('refresh_token', this)">Copiar</button></strong>
-          <code id="refresh_token">${data.refresh_token}</code>
-        </div>
-
-        <div class="step">
-          <strong>Proximos passos:</strong>
-          <ol>
-            <li>Va no Render Dashboard deste serviço</li>
-            <li>Entre em <strong>Environment</strong></li>
-            <li>Adicione as 3 variaveis acima (Key + Value) - uma por vez</li>
-            <li>Clique em <strong>Save Changes</strong></li>
-            <li>Aguarde o redeploy ficar verde (Live)</li>
-            <li>Volte ao chat com o Claude e avise que terminou</li>
-          </ol>
+          <strong>SHOPEE_REFRESH_TOKEN <button onclick="copyText('rt', this)">Copiar</button></strong>
+          <code id="rt">${data.refresh_token}</code>
         </div>
       </body>
       </html>
     `);
-
   } catch (err) {
     console.error('[CALLBACK] Erro:', err);
-    res.status(500).send(`
-      <h1>Erro interno</h1>
-      <pre>${err.message}\n\n${err.stack}</pre>
-    `);
+    res.status(500).send(`<h1>Erro</h1><pre>${err.message}</pre>`);
   }
 });
 
-// =========================================================
-// Start
-// =========================================================
-
 app.listen(PORT, () => {
   console.log(`Girassol Shopee Sync rodando na porta ${PORT}`);
-  console.log(`Partner ID: ${SHOPEE_PARTNER_ID ? SHOPEE_PARTNER_ID : 'NAO CONFIGURADO'}`);
-  console.log(`Partner Key: ${SHOPEE_PARTNER_KEY ? 'CONFIGURADA' : 'NAO CONFIGURADA'}`);
-  console.log(`Host: ${SHOPEE_HOST}`);
-  console.log(`Base URL: ${BASE_URL}`);
-});
+  console.log(`Partner ID: ${SHOPEE_PARTNER_ID || 'NAO CONFIGUR
